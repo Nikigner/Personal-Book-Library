@@ -6,7 +6,10 @@ import base64
 import math
 import subprocess
 import PyPDF2
-import time # Import time for potential performance measurement (optional)
+import time
+import logging # Import logging
+import ebooklib # Import ebooklib
+from ebooklib import epub # Import epub module from ebooklib
 
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
@@ -14,10 +17,16 @@ from PyQt5.QtWidgets import (
     QMessageBox, QGroupBox, QToolButton, QHeaderView, QStyledItemDelegate, QComboBox,
     QStyleOptionProgressBar, QStyle, QMenu, QAction, QInputDialog, QSizePolicy
 )
-from PyQt5.QtGui import QIcon, QPixmap, QPainter, QPolygon, QDesktopServices
+from PyQt5.QtGui import QIcon, QPixmap, QPainter, QPolygon, QDesktopServices, QColor
 from PyQt5.QtCore import Qt, QEvent, QPoint, QSize, QUrl, QRectF, QVariant, QTimer, QThread, pyqtSignal, QModelIndex
 
 import qdarkstyle
+
+# --------------------------
+# Configure Logging
+# --------------------------
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+
 
 # --------------------------
 # Database functions
@@ -66,26 +75,16 @@ def init_db():
         # Populate missing file_size and total_pages for existing entries if needed
         # This can be time-consuming for large libraries, consider doing this in a separate process or on demand.
         # For now, keeping the original logic but adding error handling.
-        if 'file_size' in columns:
-             c.execute("SELECT id, pdf_path FROM books WHERE file_size IS NULL")
+        if 'file_size' in columns or 'total_pages' in columns:
+             c.execute("SELECT id, pdf_path FROM books WHERE file_size IS NULL OR total_pages IS NULL OR total_pages = 0")
              for book_id, pdf_path in c.fetchall():
                  if os.path.exists(pdf_path):
                      try:
-                         file_size = os.path.getsize(pdf_path)
-                         c.execute("UPDATE books SET file_size = ? WHERE id = ?", (file_size, book_id))
-                     except OSError as e:
-                         print(f"Error getting file size for {pdf_path}: {e}")
-                         c.execute("UPDATE books SET file_size = ? WHERE id = ?", (0, book_id)) # Set to 0 on error
-        if 'total_pages' in columns:
-             c.execute("SELECT id, pdf_path FROM books WHERE total_pages IS NULL OR total_pages = 0")
-             for book_id, pdf_path in c.fetchall():
-                 if os.path.exists(pdf_path):
-                     try:
-                         total_pages = get_pdf_total_pages(pdf_path)
-                         c.execute("UPDATE books SET total_pages = ? WHERE id = ?", (total_pages, book_id))
-                     except Exception as e: # Catch potential errors from get_pdf_total_pages
-                         print(f"Error getting total pages for {pdf_path}: {e}")
-                         c.execute("UPDATE books SET total_pages = ? WHERE id = ?", (0, book_id)) # Set to 0 on error
+                         file_size, total_pages = get_book_info(pdf_path) # Use the new function
+                         c.execute("UPDATE books SET file_size = ?, total_pages = ? WHERE id = ?", (file_size, total_pages, book_id))
+                     except Exception as e:
+                         print(f"Error getting book info for {pdf_path}: {e}")
+                         c.execute("UPDATE books SET file_size = ?, total_pages = ? WHERE id = ?", (0, 0, book_id)) # Set to 0 on error
 
 
         conn.commit()
@@ -95,33 +94,72 @@ def init_db():
         if conn:
             conn.close()
 
-def get_pdf_total_pages(pdf_path):
-    """Gets the total number of pages from a PDF file."""
-    if not os.path.exists(pdf_path):
-        # print(f"PDF file not found: {pdf_path}") # Removed logging
-        return 0
+def get_book_info(file_path):
+    """Gets file size and total pages from a book file (PDF or EPUB)."""
+    if not os.path.exists(file_path):
+        logging.warning(f"Book file not found: {file_path}")
+        return 0, 0 # file_size, total_pages
+
+    file_size = 0
     try:
-        with open(pdf_path, 'rb') as f:
-            reader = PyPDF2.PdfReader(f)
-            if reader.is_encrypted:
-                try:
-                    # Attempt decryption with an empty password or common default passwords
-                    # For more robust handling, you might need to prompt the user for a password
-                    reader.decrypt('')
-                except PyPDF2.errors.FileCredentialsError:
-                    # print(f"PDF is encrypted and cannot be decrypted without a password: {pdf_path}") # Removed logging
-                    return 0 # Cannot get pages from encrypted PDF
-            return len(reader.pages)
-    except FileNotFoundError:
-        # This case should ideally be caught by the os.path.exists check, but included for robustness
-        # print(f"PDF file not found (during page count): {pdf_path}") # Removed logging
-        return 0
-    except PyPDF2.errors.PdfReadError as e:
-        print(f"Error reading PDF file {pdf_path} for page count: {e}")
-        return 0
-    except Exception as e:
-        print(f"An unexpected error occurred reading PDF pages from {pdf_path}: {e}")
-        return 0
+        file_size = os.path.getsize(file_path)
+    except OSError as e:
+        logging.error(f"Error getting file size for {file_path}: {e}")
+        file_size = 0 # Set to 0 on error
+
+    total_pages = 0
+    _, ext = os.path.splitext(file_path)
+    ext = ext.lower()
+
+    if ext == '.pdf':
+        try:
+            with open(file_path, 'rb') as f:
+                reader = PyPDF2.PdfReader(f)
+                if reader.is_encrypted:
+                    try:
+                        # Attempt decryption with an empty password or common default passwords
+                        reader.decrypt('')
+                    except PyPDF2.errors.FileCredentialsError:
+                        logging.warning(f"PDF is encrypted and cannot be decrypted without a password: {file_path}")
+                        return file_size, 0 # Cannot get pages from encrypted PDF
+                total_pages = len(reader.pages)
+        except FileNotFoundError:
+            logging.error(f"PDF file not found (during page count): {file_path}")
+            total_pages = 0
+        except PyPDF2.errors.PdfReadError as e:
+            logging.error(f"Error reading PDF file {file_path} for page count: {e}")
+            total_pages = 0
+        except Exception as e:
+            logging.error(f"An unexpected error occurred reading PDF pages from {file_path}: {e}")
+            total_pages = 0
+
+    elif ext == '.epub':
+        try:
+            book = epub.read_epub(file_path)
+            # EPUB page count is tricky as it's reflowable.
+            # Counting document items (chapters/sections) is a common approximation.
+            # Use get_items_of_type(ebooklib.ITEM_DOCUMENT) for main content items.
+            total_pages = len(list(book.get_items_of_type(ebooklib.ITEM_DOCUMENT)))
+
+            if total_pages == 0:
+                 # Fallback: count all items (including non-linear ones like CSS, images)
+                 total_pages = len(list(book.get_items()))
+                 logging.warning(f"Using total item count as fallback for EPUB page count for {file_path}")
+
+        except FileNotFoundError:
+            logging.error(f"EPUB file not found (during info extraction): {file_path}")
+            total_pages = 0
+        # Catch a broader Exception for other potential errors during EPUB processing
+        except Exception as e:
+            logging.error(f"Error reading EPUB file {file_path} for info: {e}")
+            total_pages = 0 # Set to 0 on error
+
+    else:
+        logging.warning(f"Unsupported file type for page count: {file_path}")
+        total_pages = 0 # Set to 0 for unsupported types
+
+    return file_size, total_pages
+
 
 def add_book_to_db(name, pdf_path, file_size, total_pages):
     """Adds a new book to the database."""
@@ -337,23 +375,35 @@ class SortableItem(QTableWidgetItem):
 
     def __lt__(self, other):
         """Custom comparison for sorting."""
+        logging.debug(f"Comparing self (text: '{self.text()}', data: {self._data}, type: {type(self._data)}) with other (text: '{other.text()}', data: {other._data}, type: {type(other._data)})")
+
         if isinstance(other, SortableItem):
             # If original data is available and comparable, use it
             if self._data is not None and other._data is not None:
                 try:
-                    return self._data < other._data
+                    result = self._data < other._data
+                    logging.debug(f"Comparing data: {self._data} < {other._data} = {result}")
+                    return result
                 except TypeError:
                     # Fallback to text comparison if data is not directly comparable
-                    return super().__lt__(other)
+                    logging.debug("Data not directly comparable, falling back to text comparison.")
+                    result = super().__lt__(other)
+                    logging.debug(f"Comparing text: '{self.text()}' < '{other.text()}' = {result}")
+                    return result
             # Fallback to text comparison if original data is not available
-            return super().__lt__(other)
+            logging.debug("Original data not available, falling back to text comparison.")
+            result = super().__lt__(other)
+            logging.debug(f"Comparing text: '{self.text()}' < '{other.text()}' = {result}")
+            return result
         # Fallback to default comparison if comparing with a non-SortableItem
-        return super().__lt__(other)
+        logging.debug("Comparing with non-SortableItem, falling back to default comparison.")
+        result = super().__lt__(other)
+        logging.debug(f"Comparing '{self.text()}' < '{other.text()}' = {result}")
+        return result
 
 # --------------------------
 # Progress Bar Delegate
 # --------------------------
-from PyQt5.QtGui import QColor
 
 class ProgressDelegate(QStyledItemDelegate):
     """Custom delegate for rendering a progress bar in the table."""
@@ -378,9 +428,9 @@ class ProgressDelegate(QStyledItemDelegate):
         painter.save()
         painter.setPen(Qt.NoPen)
         if percentage >= 100:
-            painter.setBrush(QColor("#3589f3"))  
+            painter.setBrush(QColor("#3589f3"))
         else:
-            painter.setBrush(QColor("#5cd02a"))  
+            painter.setBrush(QColor("#5cd02a"))
 
         progress_width = int(opt.rect.width() * (percentage / 100))
         progress_rect = QRectF(opt.rect.x(), opt.rect.y(), progress_width, opt.rect.height())
@@ -402,9 +452,9 @@ class AddBookWorker(QThread):
     error_occurred = pyqtSignal(str) # Signal to emit when an error occurs
     duplicate_found = pyqtSignal(str) # Signal to emit when a duplicate is found
 
-    def __init__(self, pdf_paths):
+    def __init__(self, file_paths):
         super().__init__()
-        self.pdf_paths = pdf_paths
+        self.file_paths = file_paths
 
     def run(self):
         if not os.path.exists(UPLOAD_FOLDER):
@@ -414,8 +464,8 @@ class AddBookWorker(QThread):
                 self.error_occurred.emit(f"Could not create upload directory: {e}")
                 return
 
-        for pdf_path in self.pdf_paths:
-            filename = os.path.basename(pdf_path)
+        for file_path in self.file_paths:
+            filename = os.path.basename(file_path)
             name, ext = os.path.splitext(filename)
 
             if check_book_exists(name):
@@ -424,12 +474,21 @@ class AddBookWorker(QThread):
 
             try:
                 destination = os.path.join(UPLOAD_FOLDER, filename)
-                shutil.copyfile(pdf_path, destination)
-                file_size = os.path.getsize(destination)
+                shutil.copyfile(file_path, destination)
 
-                total_pages = 0
-                if ext.lower() == '.pdf':
-                    total_pages = get_pdf_total_pages(destination)
+                # Use the new get_book_info function
+                file_size, total_pages = get_book_info(destination)
+
+                # Check if get_book_info returned valid page count (not 0 due to error)
+                # If total_pages is 0 and it's an EPUB, it might be unreadable/corrupted.
+                # Decide if you want to add books with 0 pages or skip them.
+                # For now, we will add them, but the user won't see progress.
+                # You could add a check here like:
+                # if ext.lower() == '.epub' and total_pages == 0:
+                #     self.error_occurred.emit(f"Could not get page count for EPUB: {filename}. Skipping.")
+                #     os.remove(destination) # Clean up the copied file
+                #     continue
+
 
                 book_id = add_book_to_db(name, destination, file_size, total_pages)
                 if book_id is not None:
@@ -441,6 +500,7 @@ class AddBookWorker(QThread):
             except Exception as e:
                 self.error_occurred.emit(f"Could not process file {filename}: {e}")
                 # Clean up the copied file if it was copied before the error
+                destination = os.path.join(UPLOAD_FOLDER, filename) # Ensure destination is defined
                 if os.path.exists(destination):
                     try:
                         os.remove(destination)
@@ -468,7 +528,8 @@ class LibraryApp(QMainWindow):
         # Timer to check for closed processes - Faster interval
         self.process_check_timer = QTimer(self)
         self.process_check_timer.timeout.connect(self.check_opened_books)
-        self.process_check_timer.start(500) # Check every 500 milliseconds (less frequent might be fine)
+        # Reduced timer interval slightly for potentially faster response, adjust if needed
+        self.process_check_timer.start(250) # Check every 250 milliseconds
 
         self.add_book_worker = None # To hold the worker thread instance
 
@@ -519,7 +580,7 @@ class LibraryApp(QMainWindow):
         self.book_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Interactive) # Allow Name column to be interactive
         self.book_table.setColumnWidth(0, 250)
         self.book_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Interactive) # Fit Star Rating to contents
-        self.book_table.setColumnWidth(1, 95) 
+        self.book_table.setColumnWidth(1, 95)
         self.book_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents) # Fit File Size to contents
         self.book_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents) # Fit Page Read to contents
         self.book_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeToContents) # Fit Total Pages to contents
@@ -538,7 +599,7 @@ class LibraryApp(QMainWindow):
         self.main_layout.addWidget(add_group)
 
         pdf_layout = QHBoxLayout()
-        pdf_label = QLabel("PDF Files:")
+        pdf_label = QLabel("Book Files:") # Changed label to be more general
         self.pdf_edit = QLineEdit()
         self.pdf_edit.setReadOnly(True)
         self.browse_button = QPushButton("Browse")
@@ -587,12 +648,14 @@ class LibraryApp(QMainWindow):
             self.book_table.setItem(row_position, 0, name_item)
 
             # Star rating item - Use SortableItem to store the integer value for sorting
+            star_rating = star_rating if star_rating is not None else 0 # Ensure star_rating is not None
             star_rating_item = SortableItem("", data=star_rating)
             star_rating_item.setData(Qt.EditRole, star_rating) # Store integer for delegate editing
             star_rating_item.setFlags(star_rating_item.flags() | Qt.ItemIsEditable) # Make editable for delegate
             self.book_table.setItem(row_position, 1, star_rating_item) # column 1
 
             # File size (bytes to MB) - Use SortableItem to store the raw size for sorting
+            file_size = file_size if file_size is not None else 0 # Ensure file_size is not None
             file_size_mb = file_size / (1024 * 1024) if file_size else 0
             file_size_item = SortableItem(f"{file_size_mb:.2f} MB", data=file_size)
             file_size_item.setFlags(file_size_item.flags() ^ Qt.ItemIsEditable) # Make non-editable
@@ -665,35 +728,46 @@ class LibraryApp(QMainWindow):
 
     def sort_books(self, column):
         """Sorts the table by the specified column."""
-        # QTableWidget's built-in sortItems uses the __lt__ method of the QTableWidgetItem
-        # Our custom SortableItem handles sorting based on the stored data.
-        current_order = self.book_table.horizontalHeader().sortIndicatorOrder()
-        # Toggle sort order if clicking the same column again
-        if self.book_table.horizontalHeader().sortIndicatorSection() == column:
-             self.sort_order = Qt.DescendingOrder if current_order == Qt.AscendingOrder else Qt.AscendingOrder
-        else:
-             self.sort_order = Qt.AscendingOrder # Default to ascending for a new column
+        logging.debug(f"sort_books called for column: {column}")
 
+        # Check if the clicked column is the same as the currently sorted column
+        if self.book_table.horizontalHeader().sortIndicatorSection() == column:
+            # If it's the same column, toggle the sort order
+            if self.sort_order == Qt.AscendingOrder:
+                self.sort_order = Qt.DescendingOrder
+            else:
+                self.sort_order = Qt.AscendingOrder
+            logging.debug(f"Clicked same column, toggling sort order to: {self.sort_order}")
+        else:
+            # If it's a new column, set the sort order to ascending by default
+            self.sort_order = Qt.AscendingOrder
+            logging.debug(f"Clicked new column, setting sort order to: {self.sort_order}")
+
+        # Perform the sorting
         self.book_table.sortItems(column, self.sort_order)
-        # Update the sort indicator in the header
+        logging.debug(f"sortItems called for column {column} with order {self.sort_order}")
+
+        # Update the sort indicator in the header to reflect the current sort order and column
         self.book_table.horizontalHeader().setSortIndicator(column, self.sort_order)
+        logging.debug("Sort indicator updated in header.")
 
 
     def browse_files(self):
         """Opens a file dialog to select PDF or EPUB files and starts the add book process."""
-        file_paths, _ = QFileDialog.getOpenFileNames(self, "Select PDF or EPUB Files", "", "PDF and EPUB Files (*.pdf *.epub)")
+        # Updated filter to include EPUB files
+        file_paths, _ = QFileDialog.getOpenFileNames(self, "Select Book Files", "", "Book Files (*.pdf *.epub);;All Files (*)")
         if file_paths:
             self.pdf_edit.setText(", ".join(file_paths))
             self.start_add_books_worker(file_paths)
 
 
-    def start_add_books_worker(self, pdf_paths):
+    def start_add_books_worker(self, file_paths):
         """Starts a worker thread to add books in the background."""
         if self.add_book_worker is not None and self.add_book_worker.isRunning():
             QMessageBox.warning(self, "Busy", "Please wait for the current book adding process to finish.")
             return
 
-        self.add_book_worker = AddBookWorker(pdf_paths)
+        self.add_book_worker = AddBookWorker(file_paths)
         self.add_book_worker.book_added.connect(self.handle_book_added)
         self.add_book_worker.error_occurred.connect(self.handle_add_book_error)
         self.add_book_worker.duplicate_found.connect(self.handle_duplicate_found)
@@ -749,12 +823,14 @@ class LibraryApp(QMainWindow):
         self.book_table.setItem(row_position, 0, name_item)
 
         # Star rating item - Use SortableItem to store the integer value for sorting
+        star_rating = star_rating if star_rating is not None else 0 # Ensure star_rating is not None
         star_rating_item = SortableItem("", data=star_rating)
         star_rating_item.setData(Qt.EditRole, star_rating) # Store integer for delegate editing
         star_rating_item.setFlags(star_rating_item.flags() | Qt.ItemIsEditable) # Make editable for delegate
         self.book_table.setItem(row_position, 1, star_rating_item) # column 1
 
         # File size (bytes to MB) - Use SortableItem to store the raw size for sorting
+        file_size = file_size if file_size is not None else 0 # Ensure file_size is not None
         file_size_mb = file_size / (1024 * 1024) if file_size else 0
         file_size_item = SortableItem(f"{file_size_mb:.2f} MB", data=file_size)
         file_size_item.setFlags(file_size_item.flags() ^ Qt.ItemIsEditable) # Make non-editable
@@ -1076,95 +1152,166 @@ class LibraryApp(QMainWindow):
     def cell_changed(self, row, column):
         """Handles changes to editable cells (e.g., Page Read, Star Rating)."""
         if self.ignore_cell_changes:
-            # print(f"cell_changed ignored for row {row}, column {column}") # Removed logging
+            # print(f"cell_changed ignored for row {row}, column {column}") # Removed logging")
             return
 
-        # print(f"cell_changed triggered for row {row}, column {column}") # Removed logging
+        # print(f"cell_changed triggered for row {row}, column {column}") # Removed logging")
 
         # --- Start of safeguard: Ignore changes to the Progress column ---
         if column == 5:
-            # print(f"Ignoring direct change to Progress column (column 5) at row {row}.") # Removed logging
+            # print(f"Ignoring direct change to Progress column (column 5) at row {row}.") # Removed logging")
             return
         # --- End of safeguard ---
 
         name_item = self.book_table.item(row, 0)
         book_data = name_item.data(Qt.UserRole)
         if not book_data:
-            # print(f"No book data found for row {row}") # Removed logging
+            # print(f"No book data found for row {row}") # Removed logging")
             return # Should not happen if row has a valid name item
 
         book_id = book_data["id"]
-        # print(f"Processing change for book ID: {book_id}") # Removed logging
+        # print(f"Processing change for book ID: {book_id}") # Removed logging")
+
 
         if column == 3: # Column 3 is Page Read
             item = self.book_table.item(row, column)
             try:
                 page_read = int(item.text())
-                # print(f"New page read value: {page_read}") # Removed logging
+                # print(f"New page read value: {page_read}") # Removed logging")
             except ValueError:
                 page_read = 0 # Handle non-integer input
                 item.setText(str(page_read)) # Reset cell text to 0 if invalid input
-                item.setData(Qt.EditRole, page_read) # Update stored data
-                item.setData(Qt.UserRole, page_read) # Update stored data for sorting
-                # print(f"Invalid page read input, reset to: {page_read}") # Removed logging
-
+                # print(f"Invalid page read input, reset to: {page_read}") # Removed logging")
 
             # Optional: Validate page_read against total_pages
             total_pages_item = self.book_table.item(row, 4) # Column 4 is Total Pages
             try:
-                total_pages = int(total_pages_item.data(Qt.UserRole)) # Get total pages from stored data
-                # print(f"Total pages for validation: {total_pages}") # Removed logging
-                if total_pages > 0 and (page_read > total_pages or page_read < 0):
+                # Access the original data used for sorting from the SortableItem
+                total_pages = total_pages_item.data(Qt.UserRole) # Correctly access data
+                # print(f"Total pages for validation: {total_pages}") # Removed logging")
+                if total_pages is not None and total_pages > 0 and (page_read > total_pages or page_read < 0):
                      QMessageBox.warning(self, "Input Error", f"Invalid page number ({page_read}). Must be between 0 and {total_pages}.")
                      # Revert cell value to the last saved value from the database
                      current_book_data = get_books_by_id(book_id)
                      if current_book_data:
                          correct_page_read = current_book_data[5]
                          item.setText(str(correct_page_read))
-                         item.setData(Qt.EditRole, correct_page_read)
-                         item.setData(Qt.UserRole, correct_page_read)
-                         # print(f"Invalid page number, reverted to: {correct_page_read}") # Removed logging
+                         # Update the _data attribute with the corrected value
+                         if isinstance(item, SortableItem):
+                             item._data = correct_page_read
+                             item.setData(Qt.UserRole, correct_page_read) # Also update UserRole
+                         # print(f"Invalid page number, reverted to: {correct_page_read}") # Removed logging")
                      return # Do not update database
 
-            except (ValueError, TypeError):
-                # Handle cases where total_pages might not be a valid number
-                # print("Could not get valid total pages for validation.") # Removed logging
+            except (ValueError, TypeError, AttributeError):
+                # Handle cases where total_pages might not be a valid number or item is not SortableItem
+                # print("Could not get valid total pages for validation or item type is unexpected.") # Removed logging")
                 pass # Proceed with updating page_read without total_pages validation
 
             # Update the database
             update_book_in_db(book_id, page_read=page_read)
-            # print(f"Database updated for book ID {book_id} with page read {page_read}") # Removed logging
+            # print(f"Database updated for book ID {book_id} with page read {page_read}") # Removed logging")
+
+            # --- Update SortableItem._data for Page Read and trigger sort update ---
+            if isinstance(item, SortableItem):
+                 item._data = page_read # ** Crucial: Update the internal data for sorting **
+                 item.setData(Qt.UserRole, page_read) # Also update UserRole for consistency/potential other uses
+                 # print(f"Updated PageRead SortableItem _data and UserRole data to: {page_read}") # Removed logging")
+
+
+            # After updating the data, explicitly tell the table to sort again
+            current_sort_column = self.book_table.horizontalHeader().sortIndicatorSection()
+            current_sort_order = self.book_table.horizontalHeader().sortIndicatorOrder()
+            if current_sort_column != -1: # Only re-sort if a column is currently sorted
+                 # Temporarily disable sorting to prevent recursive cell_changed calls
+                 self.book_table.setSortingEnabled(False)
+                 self.book_table.sortItems(current_sort_column, current_sort_order)
+                 self.book_table.setSortingEnabled(True)
+                 # print("Triggered re-sort after Page Read change.") # Removed logging")
+            # --- End of Update SortableItem data for Page Read ---
+
 
             # --- Start of real-time progress bar update (replacing item) ---
             # Recalculate percentage based on potentially updated page_read and total_pages
-            total_pages_for_progress = int(self.book_table.item(row, 4).data(Qt.UserRole)) if self.book_table.item(row, 4).data(Qt.UserRole) is not None else 0
+            # Fetch the latest total_pages from the item's data as it might have been corrected
+            total_pages_for_progress_item = self.book_table.item(row, 4)
+            total_pages_for_progress = total_pages_for_progress_item.data(Qt.UserRole) if total_pages_for_progress_item and total_pages_for_progress_item.data(Qt.UserRole) is not None else 0
+
+
             percentage = 0
             if total_pages_for_progress > 0:
                  percentage = min(100, max(0, int((page_read / total_pages_for_progress) * 100)))
 
-            # print(f"Calculated percentage: {percentage}%") # Removed logging
+            # print(f"Calculated percentage: {percentage}%") # Removed logging")
 
             # Create a new ProgressItem with the updated percentage
-            new_progress_item = SortableItem("", data=percentage)
+            new_progress_item = SortableItem("", data=percentage) # Use 'data' to set _data for sorting
             new_progress_item.setData(Qt.UserRole, percentage) # Store percentage for delegate/sorting
             new_progress_item.setFlags(Qt.ItemIsEnabled) # Make it read-only
 
             # Replace the old item with the new one
             self.book_table.setItem(row, 5, new_progress_item)
-            # print(f"Replaced ProgressItem at row {row}, column 5 with new item containing percentage: {percentage}") # Removed logging
+            # print(f"Replaced ProgressItem at row {row}, column 5 with new item containing percentage: {percentage}") # Removed logging")
 
-            # The setItem call should implicitly trigger a repaint, but we can keep the explicit
-            # viewport update as a fallback, though it might be redundant now.
+            # The setItem call should implicitly trigger a repaint and sort consideration for this column.
+            # Keeping the explicit viewport update as a fallback.
             progress_index = self.book_table.model().index(row, 5)
             self.book_table.viewport().update(self.book_table.visualRect(progress_index))
-            # print(f"Requested viewport update for progress cell at row {row}, column 5 (after replacement)") # Removed logging
+            # print(f"Requested viewport update for progress cell at row {row}, column 5 (after replacement)") # Removed logging")
             # --- End of real-time progress bar update ---
 
 
         elif column == 1: # Column 1 is Star Rating
             star_rating_item = self.book_table.item(row, column)
             star_rating = star_rating_item.data(Qt.EditRole) # Get the integer value from EditRole
-            # print(f"New star rating value: {star_rating}") # Removed logging
+            # print(f"New star rating value: {star_rating}") # Removed logging")
+
+            # Read status is implicitly set based on star rating in StarDelegate now
+            # We still need to update the DB with the star rating change
+            # Fetch current read status from DB to avoid overwriting
+            current_book_data = get_books_by_id(book_id)
+            if current_book_data:
+                read_status = current_book_data[3] # Get current read status from DB
+            else:
+                read_status = 0
+
+
+            update_book_in_db(book_id, read_status=read_status, star_rating=star_rating)
+            # print(f"Database updated for book ID {book_id} with star rating {star_rating}") # Removed logging")
+
+            # --- Update SortableItem._data for Star Rating and trigger sort update ---
+            if isinstance(star_rating_item, SortableItem):
+                 star_rating_item._data = star_rating # ** Crucial: Update the internal data for sorting **
+                 star_rating_item.setData(Qt.UserRole, star_rating) # Also update UserRole for consistency
+                 # print(f"Updated StarRatingItem _data and UserRole data to: {star_rating}") # Removed logging")
+
+
+            # Trigger re-sort after Star Rating change
+            current_sort_column = self.book_table.horizontalHeader().sortIndicatorSection()
+            current_sort_order = self.book_table.horizontalHeader().sortIndicatorOrder()
+            if current_sort_column != -1: # Only re-sort if a column is currently sorted
+                 # Temporarily disable sorting to prevent recursive cell_changed calls
+                 self.book_table.setSortingEnabled(False)
+                 self.book_table.sortItems(current_sort_column, current_sort_order)
+                 self.book_table.setSortingEnabled(True)
+                 # print("Triggered re-sort after Star Rating change.") # Removed logging")
+
+
+            # Trigger repaint for the star rating column to ensure the stars visually update
+            self.book_table.viewport().update(self.book_table.visualRect(self.book_table.model().index(row, 1)))
+            # print(f"Requested viewport update for star rating cell at row {row}, column 1") # Removed logging")
+
+            # --- End of Update SortableItem data for Star Rating ---
+
+            # --- End of Update SortableItem data for Star Rating ---
+            # print(f"Requested viewport update for progress cell at row {row}, column 5 (after replacement)") # Removed logging")
+            # --- End of real-time progress bar update ---
+
+
+        elif column == 1: # Column 1 is Star Rating
+            star_rating_item = self.book_table.item(row, column)
+            star_rating = star_rating_item.data(Qt.EditRole) # Get the integer value from EditRole
+            # print(f"New star rating value: {star_rating}") # Removed logging")
 
             # Read status is implicitly set based on star rating in StarDelegate now
             # We still need to update the DB with the star rating change
@@ -1176,12 +1323,12 @@ class LibraryApp(QMainWindow):
                 read_status = 0
 
             update_book_in_db(book_id, read_status=read_status, star_rating=star_rating)
-            # print(f"Database updated for book ID {book_id} with star rating {star_rating}") # Removed logging
+            # print(f"Database updated for book ID {book_id} with star rating {star_rating}") # Removed logging")
 
             # Update the SortableItem's data for sorting
             if isinstance(star_rating_item, SortableItem):
                  star_rating_item.setData(Qt.UserRole, star_rating)
-                 # print(f"Updated StarRatingItem UserRole data to: {star_rating}") # Removed logging
+                 # print(f"Updated StarRatingItem UserRole data to: {star_rating}") # Removed logging")
 
 
     def show_context_menu(self, pos):
@@ -1271,8 +1418,14 @@ if __name__ == "__main__":
             print(f"Error creating upload directory on startup: {e}")
             # Decide how to handle this error - maybe show a critical message and exit
             sys.exit(1) # Exit if cannot create necessary directory
+    if getattr(sys, 'frozen', False):
+        base_path = sys._MEIPASS
+    else:
+        base_path = os.path.dirname(__file__)
+    icon_path = os.path.join(base_path, "app_icon.ico")
 
     app = QApplication(sys.argv)
+    app.setWindowIcon(QIcon(icon_path))
     window = LibraryApp()
     window.show()
     sys.exit(app.exec_())
