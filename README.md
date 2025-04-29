@@ -1,6 +1,4 @@
-# Personal-Book-Library
-
-# 📚 Book Library Manager (PyQt5)
+# 📚 Personal Book Library (PyQt5)
 
 Manage your personal digital library of PDF/EPUB files with a sleek, user-friendly desktop app.  
 Easily track your reading progress, rate books with stars, and manage everything in one place.
