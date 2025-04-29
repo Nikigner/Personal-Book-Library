@@ -36,7 +36,7 @@ pip install -r requirements.txt
 ## 🚀 Running the App
 
 ```bash
-python pyqt5.py
+python Personal-book-library.py
 ```
 
     
