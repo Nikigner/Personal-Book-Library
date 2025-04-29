@@ -1,11 +1,12 @@
 # 📚 Personal Book Library (PyQt5)
 
-Manage your personal digital library of PDF/EPUB files with a sleek, user-friendly desktop app.  
+Manage your personal digital library of PDF/EPUB files with a user-friendly desktop app.  
 Easily track your reading progress, rate books with stars, and manage everything in one place.
 
 ![screenshot](https://github.com/user-attachments/assets/5e9f87ba-fa5f-4004-a485-3d0be3c0d39e)
 
 
+  
 ---
 
 ## ✨ Features
@@ -48,6 +49,12 @@ pip install pyinstaller
 pyinstaller --onefile --windowed pyqt5.py
 ```
 
+
+## 🔐 Safety Note
+This app is unsigned, so you may get a warning from Windows SmartScreen.
+If that happens, click “More info” → “Run anyway” to launch it.
+(This is expected for indie apps not published through Microsoft Store.)
+    
     
     
 ## 📁 Project Structure
