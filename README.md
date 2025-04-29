@@ -3,7 +3,7 @@
 Manage your personal digital library of PDF/EPUB files with a sleek, user-friendly desktop app.  
 Easily track your reading progress, rate books with stars, and manage everything in one place.
 
-![screenshot](https://imgur.com/a/BGXqQDb)  
+![screenshot](https://imgur.com/9dhkGrI)  
 
 
 ---
