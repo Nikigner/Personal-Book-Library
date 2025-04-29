@@ -3,7 +3,7 @@
 Manage your personal digital library of PDF/EPUB files with a sleek, user-friendly desktop app.  
 Easily track your reading progress, rate books with stars, and manage everything in one place.
 
-![screenshot](https://github.com/user-attachments/assets/bd1d29bd-2297-40aa-a159-59e3fb9c97c7)
+![screenshot](https://github.com/user-attachments/assets/5e9f87ba-fa5f-4004-a485-3d0be3c0d39e)
 
 
 ---
@@ -67,9 +67,10 @@ pyinstaller --onefile --windowed pyqt5.py
 ## ✅ To-Do / Roadmap
 
 -  Drag-and-drop support
--  Metadata extraction for EPUB files
--  Support multiple languages
+-  Audio books Support
 -  Cloud sync or backup option
+-  Support multiple languages
+
 
     
     
